@@ -1,0 +1,136 @@
+#!/usr/bin/perl 
+use DBI;
+use strict;
+#定义抓取sql时间,秒为单位
+my $t=10;
+#定义汇报sql的服务类型
+my $type='app';
+##定义获取数据库信息
+my $db_ip='ip';
+my $db_user='db';
+my $db_pass='db*&%';
+my $db_dbname='system';
+##定义本地数据库信息
+my $local_dbip='localhost';
+my $local_dbuser='back';
+my $local_dbpass='back';
+my $local_db='mysql';
+my $dbh;
+#定义抓取线上sql日志文件,数据库目录下
+my $basedir=`mysql -uback -pback -e"show variables like 'datadir'"|awk '{ print \$2}'|sed -n '2'p`;
+chomp($basedir);
+my $general_log="$basedir/general_log";
+`>$general_log`;
+#
+my %hashnum;
+#定义数据源信息
+sub dbcon{
+	my $dsn="DBI:mysql:database=$db_dbname;host=$db_ip;port=3306;mysql_socket=/tmp/mysql.sock";
+	$dbh = DBI->connect("$dsn","$db_user","$db_pass") or  die "Unable to connect: $DBI::errstr\n"; 
+ 	$dbh->do("SET names utf8");
+}
+#定义本地数据库信息
+my $ldbh;
+sub local_dbcon{
+	    my $dsn1="DBI:mysql:database=$local_db;host=$local_dbip;port=3306;mysql_socket=/tmp/mysql.sock";
+   	    $ldbh = DBI->connect("$dsn1","$local_dbuser","$local_dbpass") or  die "Unable to connect: $DBI::errstr\n";
+      	my $i=$ldbh->do("set names utf8;");
+
+}
+
+my $local_ip=`/sbin/ifconfig |grep inet| grep -i bcast|cut -d':' -f2|awk '{print \$1}'|grep -v -E '10.1|172.|192.`;
+chomp($local_ip);
+#定义插入数据中心函数
+sub insert_table{
+	&dbcon();
+	my $info=$_[0];
+        my @infos=split(/\|/,$info);
+        my $sql=$infos[0];
+        my $res=$infos[1];
+        my $key=$infos[2];
+		my $ch="select count(*) from db_list_sql where type='$type' and `sql` like \"%$key%\"";
+        my $sth = $dbh->prepare("$ch");
+        $sth->execute();
+        my $num='';
+        while (my @row = $sth->fetchrow_array ) {
+                $num=$row[0];
+        }
+		if($num eq 0 ){
+
+	        my $fsql="INSERT INTO `db_list_sql` (`type`, `sql`, `ip`,`result`) VALUES ('$type', \"$sql\", '$local_ip','$res')";
+    	    my $i=$dbh->do($fsql);
+		}else{
+            my $fsql="UPDATE db_list_sql set num=num+1,`result`='$res' where type='$type' and `sql` like \"%$key%\"";
+            my $i=$dbh->do($fsql);
+		}
+
+}
+#对抓取的sql进行分析
+sub analysis_sql{
+	&local_dbcon;
+	my $log=$_[0];
+    chomp($log);
+	open (LOG_FILE,$log) || die ("$log is not exit....$!\n");
+	#$/="select";
+	undef %hashnum;
+    while(defined(my $line =<LOG_FILE>)){
+		chomp($line);
+		if($line =~ /\s+(\w+)(.*)select\s+(.*)from\s+(.*)\s+where\s+(.*)/img){
+			chomp($3);
+			my $key=$3;
+			my $table=$4;
+			my $table_all=$4;
+			my $where=$5;
+			if($table =~ /(\w+)(.*)/img){
+				$table=$1;
+			}
+		    if($table =~ /(\w+)(.*)join/img){
+				$table =$1;
+			}			
+			my $get_db="select TABLE_SCHEMA DB from information_schema.tables where table_name='$table' LIMIT 1";
+ 		    my $gsth = $ldbh->prepare("$get_db");
+			$gsth->execute();
+			my $dbname;
+	        while (my @row = $gsth->fetchrow_array ) {
+				$dbname=$row[0];
+			}
+			chomp($dbname);
+	        my $dsn1="DBI:mysql:database=$dbname;host=$local_dbip;port=3306;mysql_socket=/tmp/mysql.sock";
+	        $ldbh = DBI->connect("$dsn1","$local_dbuser","$local_dbpass") or  die "Unable to connect: $DBI::errstr\n";
+			my $gsql="select $key from $table_all where $where";
+			my $sth = $ldbh->prepare("$gsql");
+			{$hashnum{$gsql}++;}
+			$sth->execute();
+			my $res;
+       		while (my @row = $sth->fetchrow_array ) {
+            	$res=$row[$#row];
+				chomp($res);
+				&insert_table("$gsql|$res|$key");
+       		}
+
+		}
+    }
+	#my $total=0;
+	#foreach my $pv (sort keys (%hashnum)){
+    #        print $pv,"---",$hashnum{$pv},"\n";
+    #        $total += $hashnum{$pv};
+	#}
+close LOG_FILE;
+}
+#定义本地获取sql函数
+sub get_sql{
+	&local_dbcon;
+	my $sql='set global general_log=1';
+	my $sql2="set global general_log_file='$general_log';";
+	my $i=$ldbh->do($sql);
+	my $i=$ldbh->do($sql2);
+	my $i;
+    for($i=0;$i<=$t;$i++){	
+		print "please wait $t seconds, NOW is $i\n";	
+		sleep 1;
+	}
+	my $sql='set global general_log=0';
+    my $i=$ldbh->do($sql);
+	&analysis_sql($general_log);
+}
+&get_sql();
